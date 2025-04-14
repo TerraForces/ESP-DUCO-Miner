@@ -1,6 +1,7 @@
 #pragma GCC optimize("-Ofast")
 
 #include <Arduino.h>
+#include <esp_mac.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -9,12 +10,7 @@
 
 class DSHA1 {
 public:
-	
-	DSHA1() {
-		initialize(s);
-	}
-
-	DSHA1 &write(const uint8_t* data, size_t len) {
+	inline void write(const uint8_t* data, size_t len) {
 		size_t bufsize = bytes % 64;
 		if (bufsize && bufsize + len >= 64) {
 			memcpy(buf + bufsize, data, 64 - bufsize);
@@ -33,10 +29,9 @@ public:
 			memcpy(buf + bufsize, data, len);
 			bytes += len;
 		}
-		return *this;
 	}
-
-	void finalize(uint32_t hash[5]) {
+	
+	inline void finalize(uint32_t hash[5]) {
 		const uint8_t pad[64] = { 0x80 };
 		uint64_t sizedesc = __builtin_bswap64(bytes << 3);
 		write(pad, 1 + ((119 - (bytes % 64)) % 64));
@@ -48,21 +43,29 @@ public:
 		hash[4] = __builtin_bswap32(s[4]);
 	}
 
-	DSHA1 &reset() {
+	inline void reset() {
 		bytes = 0;
-		initialize(s);
-		return *this;
+		s[0] = 0x67452301ul;
+		s[1] = 0xEFCDAB89ul;
+		s[2] = 0x98BADCFEul;
+		s[3] = 0x10325476ul;
+		s[4] = 0xC3D2E1F0ul;
 	}
 
-	// IDK who invented this, but it does not work without it
-	DSHA1& warmup() {
+	inline void warmup() {
 		uint32_t warmup[5];
-		this->write((uint8_t *)"warmupwarmupwa", 20).finalize(warmup);
-		return *this;
+		write((uint8_t *)"warmupwarmupwa", 20);
+		finalize(warmup);
 	}
 
 private:
-	uint32_t s[5];
+	uint32_t s[5] = {
+		0x67452301ul,
+		0xEFCDAB89ul,
+		0x98BADCFEul,
+		0x10325476ul,
+		0xC3D2E1F0ul
+	};
 	unsigned char buf[64];
 	uint64_t bytes;
 
@@ -71,26 +74,18 @@ private:
 	const uint32_t k3 = 0x8F1BBCDCul;
 	const uint32_t k4 = 0xCA62C1D6ul;
 
-	uint32_t inline f1(uint32_t b, uint32_t c, uint32_t d) { return d ^ (b & (c ^ d)); }
-	uint32_t inline f2(uint32_t b, uint32_t c, uint32_t d) { return b ^ c ^ d; }
-	uint32_t inline f3(uint32_t b, uint32_t c, uint32_t d) { return (b & c) | (d & (b | c)); }
+	inline uint32_t f1(uint32_t b, uint32_t c, uint32_t d) { return d ^ (b & (c ^ d)); }
+	inline uint32_t f2(uint32_t b, uint32_t c, uint32_t d) { return b ^ c ^ d; }
+	inline uint32_t f3(uint32_t b, uint32_t c, uint32_t d) { return (b & c) | (d & (b | c)); }
 
-	uint32_t inline left(uint32_t x) { return (x << 1) | (x >> 31); }
+	inline uint32_t left(uint32_t x) { return (x << 1) | (x >> 31); }
 
-	void inline Round(uint32_t a, uint32_t &b, uint32_t c, uint32_t d, uint32_t &e, uint32_t f, uint32_t k, uint32_t w) {
+	inline void Round(uint32_t a, uint32_t &b, uint32_t c, uint32_t d, uint32_t &e, uint32_t f, uint32_t k, uint32_t w) {
 		e += ((a << 5) | (a >> 27)) + f + k + w;
 		b = (b << 30) | (b >> 2);
 	}
 
-	void initialize(uint32_t s[5]) {
-		s[0] = 0x67452301ul;
-		s[1] = 0xEFCDAB89ul;
-		s[2] = 0x98BADCFEul;
-		s[3] = 0x10325476ul;
-		s[4] = 0xC3D2E1F0ul;
-	}
-
-	void transform(uint32_t *s, const uint32_t* chunk) {
+	inline void transform(uint32_t *s, const uint32_t* chunk) {
 		uint32_t a = s[0], b = s[1], c = s[2], d = s[3], e = s[4];
 		uint32_t w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15;
 
@@ -187,18 +182,24 @@ private:
 	}
 };
 
-// not optimized yet
-String readClientString(WiFiClient* client) {
+inline void handleCore0Watchdog(int64_t& lastDelay) {
+	if(esp_timer_get_time() > lastDelay + 100000) {
+		vTaskDelay(TASK_DELAY_0);
+		lastDelay = esp_timer_get_time();
+	}
+}
+
+inline String readClientString(WiFiClient& client, int64_t& lastDelay, uint8_t coreID) {
     int64_t startTime = esp_timer_get_time();
-    while(client->connected()) {
-        if(client->available()) return client->readStringUntil('\n');
+    while(client.connected()) {
+        if(client.available()) return client.readStringUntil('\n');
         if(esp_timer_get_time() - startTime > 60000000) esp_restart();
-		if(xPortGetCoreID() == 0) vTaskDelay(10);
+		if(coreID == 0) handleCore0Watchdog(lastDelay);
     }
     return "";
 }
 
-uint8_t incrementStr(char* str) {
+inline uint8_t incrementStr(char* str) {
     if(*str < '9') {
         (*str)++;
         return 1;
@@ -209,16 +210,19 @@ uint8_t incrementStr(char* str) {
     }
 }
 
+inline uint8_t charToHex(char c) {
+	if(c <= '9') return c - '0';
+	if(c <= 'F') return c - 'A' + 10;
+	if(c <= 'f') return c - 'a' + 10;
+	return 0;
+}
+
 IPAddress nodeIP;
 uint16_t nodePort;
 uint16_t walletID;
-
-inline void handleCore0Watchdog(int64_t& lastDelay) {
-	if(esp_timer_get_time() > lastDelay + 100000) {
-		vTaskDelay(10);
-		lastDelay = esp_timer_get_time();
-	}
-}
+const char jobRequest[] = "JOB," DUCO_NAME "," START_DIFFICULTY "," MINING_KEY "\n";
+constexpr uint16_t resultMessageBaseLen = 33 + strlen(SOFTWARE_NAME) + strlen(MINER_NAME);
+char resultMessageBase[resultMessageBaseLen];
 
 void mine(void*) {
 	int64_t lastDelay = esp_timer_get_time();
@@ -226,11 +230,6 @@ void mine(void*) {
     WiFiClient client;
     DSHA1 sha;
     sha.warmup();
-	const char jobRequest[] = "JOB," DUCO_NAME "," START_DIFFICULTY "," MINING_KEY "\n";
-	char resultMessageBase[200];
-	uint64_t chip_id;
-    esp_efuse_mac_get_default((uint8_t*)(&chip_id));
-	snprintf(resultMessageBase, sizeof(resultMessageBase), "%%u,%%f," SOFTWARE_NAME "," MINER_NAME ",DUCOID%04X%08X,%u\n", (uint16_t)(chip_id >> 32), (uint32_t)chip_id, walletID);
     while(true) {
         if(!client.connected()) {
 			int64_t startTime = esp_timer_get_time();
@@ -238,36 +237,35 @@ void mine(void*) {
 				if(esp_timer_get_time() - startTime > 60000000) esp_restart();
 				if(coreID == 0) handleCore0Watchdog(lastDelay);
 			}
-            readClientString(&client);
+            readClientString(client, lastDelay, coreID);
         }
-		client.print(jobRequest);
-
-		// not optimized yet
-        String response = readClientString(&client);
-        uint32_t idx1 = response.indexOf(',');
-        String lastBlockHash = response.substring(0, idx1);
-        uint32_t idx2 = response.indexOf(',', idx1 + 1);
-        String expectedHashStr = response.substring(idx1 + 1, idx2);
-        uint8_t expectedHash[20];
-        for(uint8_t i = 0; i < 20; i++) expectedHash[i] = strtoul(expectedHashStr.substring(i * 2, (i * 2) + 2).c_str(), 0, 16);
-        uint32_t difficulty = response.substring(idx2 + 1).toInt() * 100 + 1;
-
+		String response;
+		do {
+			client.write((const uint8_t*)jobRequest, strlen(jobRequest));
+			response = readClientString(client, lastDelay, coreID);
+		} while(response[0] == 'B');
+		const char* buffer = response.c_str();
+		uint8_t expectedHash[20];
+		for(uint8_t i = 0; i < 20; i++) expectedHash[i] = (charToHex(buffer[41 + (i * 2)]) << 4) | charToHex(buffer[42 + (i * 2)]);
+        uint32_t difficulty = atoi(buffer + 82) * 100;
         uint32_t hash[5];
-        sha.reset().write((const uint8_t*)lastBlockHash.c_str(), lastBlockHash.length());
+        sha.reset();
+		sha.write((const uint8_t*)buffer, 40);
         int64_t startTime = esp_timer_get_time();
-		int64_t lastDelay = startTime;
         uint8_t iStrLen = 1;
         char iStr[11] = { '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', 0 };
-        for (uint32_t i = 0; i < difficulty; i++) {
+        for(uint32_t i = 0; i < difficulty; i++) {
             DSHA1 ctx = sha;
-            ctx.write((const uint8_t*)(iStr + 10 - iStrLen), iStrLen).finalize(hash);
-            iStrLen = max(incrementStr(iStr + 9), iStrLen);
+            ctx.write((const uint8_t*)(iStr + 10 - iStrLen), iStrLen);
+			ctx.finalize(hash);
+			if(iStr[9] < '9') iStr[9]++;
+			else iStrLen = max(incrementStr(iStr + 9), iStrLen);
 			if(coreID == 0) handleCore0Watchdog(lastDelay);
             if (memcmp(expectedHash, hash, 20) == 0) {
-				char resultMessage[200];
-                snprintf(resultMessage, 200, resultMessageBase, i, i * 1000000.0f / (esp_timer_get_time() - startTime));
-				client.write((const uint8_t*)resultMessage, 200);
-				readClientString(&client);
+				char resultMessage[resultMessageBaseLen + 16];
+                snprintf(resultMessage, sizeof(resultMessage), resultMessageBase, i, i * 1000000.0f / (esp_timer_get_time() - startTime));
+				client.write((const uint8_t*)resultMessage, strlen(resultMessage));
+				String submissionResponse = readClientString(client, lastDelay, coreID);
                 break;
             }
         }
@@ -280,12 +278,12 @@ void setup() {
 	WiFi.mode(WIFI_STA);
 	WiFi.setSleep(false);
 	WiFi.begin(WIFI_SSID, WIFI_KEY);
-    while(WiFi.status() != WL_CONNECTED) delay(100);
+    while(WiFi.status() != WL_CONNECTED) vTaskDelay(100);
 	while ((WiFi.status() != WL_CONNECTED) || (WiFi.localIP() == IPAddress(0, 0, 0, 0)) || (WiFi.localIP() == IPAddress(192, 168, 4, 2)) || (WiFi.localIP() == IPAddress(192, 168, 4, 3))) {
         WiFi.disconnect();
-        delay(500);
+        vTaskDelay(500);
         WiFi.reconnect();
-        delay(500);
+        vTaskDelay(500);
     }
     WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(), IPAddress(1, 1, 1, 1));
 
@@ -301,14 +299,20 @@ void setup() {
         esp_restart();
     }
 	String result = https.getString();
-    nodeIP.fromString(result.substring(7, result.indexOf('\"', 7)));
+    nodeIP.fromString(result.substring(7, result.indexOf('\"', 7)).c_str());
 	int portIdx = result.indexOf("port\":");
 	nodePort = result.substring(portIdx + 6, result.indexOf(',', portIdx + 6)).toInt();
     https.end();
 
 	// start mining
 	walletID = esp_random() % 2811u;
+	uint64_t chip_id;
+    esp_efuse_mac_get_default((uint8_t*)(&chip_id));
+	snprintf(resultMessageBase, resultMessageBaseLen, "%%u,%%f," SOFTWARE_NAME "," MINER_NAME ",DUCOID%04X%08X,%u\n", (uint16_t)(chip_id >> 32), (uint32_t)chip_id, walletID);
 	if(CORE_COUNT > 1) xTaskCreatePinnedToCore(mine, "Mining Task", 15000, 0, 1, 0, 1 - xPortGetCoreID());
+
+	// place to start tasks for other functionalities
+
 	mine(0);
 }
 

@@ -27,10 +27,10 @@
 ///////////////////////////////////////////////////////////////////////
 
 // miner name ("Identifier") shown in the miner list on your dashboard
-#define MINER_NAME "ESP DUCO Miner"
+#define MINER_NAME "Lightweight ESP Miner"
 
 // software name shown in the miner details tab on your dashboard
-#define SOFTWARE_NAME "Lightweight ESP DUCO Miner 1.0"
+#define SOFTWARE_NAME "Lightweight ESP DUCO Miner 1.1"
 
 
 ///////////////////////////////////////////////////////////////////////
@@ -48,5 +48,8 @@
 
 // mining core count (2 for ESP32 or ESP32-S3, 1 for any other ESP32/ESP8266)
 #define CORE_COUNT SOC_CPU_CORES_NUM
+
+// core 0 task delay to avoid watchdog (in ticks, normally equal to milliseconds)
+#define TASK_DELAY_0 10
 
 #endif
